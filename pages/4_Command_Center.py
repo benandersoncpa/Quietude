@@ -133,6 +133,19 @@ try:
     user_list = users_df['Users'].tolist() if not users_df.empty else []
     workflow_options = {name: str(w_id) for name, w_id in zip(workflows_df['Workflow Name'], workflows_df['WorkflowID'])} if not workflows_df.empty else {}
 
+    # Add troubleshooting section if experiencing API errors
+    with st.expander("⚙️ Troubleshooting (Gmail API Issues)"):
+        st.markdown("""
+        **If you're seeing "Precondition check failed" errors:**
+        1. Clear your browser cache (Ctrl+Shift+Delete on Windows/Linux, Cmd+Shift+Delete on Mac)
+        2. Try refreshing the page
+        3. If issue persists, your Streamlit Cloud account may have hit fair-use limits
+        """)
+        if st.button("🔄 Reset Authentication Cache"):
+            from quietude import clear_auth_cache
+            clear_auth_cache()
+            st.success("Authentication cache cleared! Please refresh the page.")
+            st.rerun()
 
     if 'action_queue' not in st.session_state or st.button("🔄 Fetch New Batch"):
         with st.spinner("Fetching a new batch of actions..."):

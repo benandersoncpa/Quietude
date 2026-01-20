@@ -60,6 +60,10 @@ def authenticate_google():
     sheets_service = build('sheets', 'v4', credentials=creds)
     return gspread_client, gmail_service, sheets_service
 
+def clear_auth_cache():
+    """Force re-authentication by clearing the cached credentials."""
+    st.cache_resource.clear()
+
 # --- DATA & ACTION FUNCTIONS ---
 @st.cache_data(ttl=60)
 def fetch_sheet_data(_client, sheet_name):
@@ -223,6 +227,7 @@ def run_fetch_communications(gmail_service, gspread_client, max_retries=2):
     """
     Fetches recent emails with robust error handling and retry logic.
     If fetch fails, returns gracefully without crashing the app.
+    Handles 400 and 403 errors gracefully.
     """
     import time
     
@@ -250,16 +255,19 @@ def run_fetch_communications(gmail_service, gspread_client, max_retries=2):
                         break
                         
                 except HttpError as e:
-                    if e.resp.status == 403:
-                        # Precondition failed or quota exceeded - wait and retry
+                    error_code = e.resp.status
+                    # Handle 400 (Precondition Failed) and 403 (Forbidden/Quota)
+                    if error_code in [400, 403]:
                         if attempt < max_retries - 1:
-                            wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s, etc.
-                            st.warning(f"⚠️ Gmail API temporarily unavailable. Retrying in {wait_time}s... (Attempt {attempt + 1}/{max_retries})")
+                            wait_time = 2 ** (attempt + 1)  # 2s, 4s backoff
+                            # On second attempt, suggest clearing cache
+                            if attempt == 1:
+                                st.info("💡 Try clicking 'Clear Cache' in the browser menu if this persists.")
+                            st.warning(f"⚠️ Gmail API temporarily unavailable (Error {error_code}). Retrying in {wait_time}s... (Attempt {attempt + 1}/{max_retries})")
                             time.sleep(wait_time)
                             break  # Break inner loop to retry outer loop
                         else:
-                            # Final attempt failed - show warning but don't crash
-                            st.warning("⚠️ Gmail API unavailable. Using previously cached communications. Please try again later.")
+                            st.warning("⚠️ Gmail API unavailable. Using previously cached communications. Try refreshing the page or clearing your browser cache.")
                             return False
                     else:
                         raise
@@ -301,8 +309,8 @@ def run_fetch_communications(gmail_service, gspread_client, max_retries=2):
                     existing_ids.add(msg_id)
                     
                 except HttpError as e:
-                    if e.resp.status == 403:
-                        # Skip this individual message and continue
+                    # Skip individual messages that fail with 400/403
+                    if e.resp.status in [400, 403]:
                         continue
                     else:
                         raise
@@ -319,13 +327,14 @@ def run_fetch_communications(gmail_service, gspread_client, max_retries=2):
             return True
             
         except HttpError as error:
-            if error.resp.status == 403 and attempt < max_retries - 1:
-                wait_time = 2 ** attempt
-                st.warning(f"⚠️ Gmail API temporarily unavailable. Retrying... (Attempt {attempt + 1}/{max_retries})")
+            error_code = error.resp.status
+            if error_code in [400, 403] and attempt < max_retries - 1:
+                wait_time = 2 ** (attempt + 1)
+                st.warning(f"⚠️ Gmail API temporarily unavailable (Error {error_code}). Retrying... (Attempt {attempt + 1}/{max_retries})")
                 time.sleep(wait_time)
                 continue
             else:
-                st.warning(f"⚠️ Gmail API unavailable ({error.resp.status}). Using cached communications.")
+                st.warning(f"⚠️ Gmail API unavailable (Error {error_code}). Using cached communications. Try refreshing the page or clearing your browser cache.")
                 return False
                 
         except Exception as e:

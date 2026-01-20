@@ -80,7 +80,10 @@ def fetch_sheet_data(_client, sheet_name):
 
 def update_task_status(gspread_client, task_id, new_status):
     """
-    Updates a task's status and triggers all associated workflow logic using the correct data structure.
+    Updates a task's status. If marked 'Done' and part of a workflow:
+    - Advances the Active_Workflow to the next step
+    - Calculates and updates dates for the next task in the workflow
+    - Checks if this step triggers a new workflow
     """
     try:
         tasks_df = fetch_sheet_data(gspread_client, TASKS_SHEET_NAME)
@@ -98,6 +101,7 @@ def update_task_status(gspread_client, task_id, new_status):
             st.error(f"Could not find cell for TaskID {task_id} in the sheet.")
             return
             
+        # Update the task status
         tasks_sheet.update_cell(cell.row, tasks_df.columns.get_loc('Status') + 1, new_status)
         if new_status == 'Done':
             try:
@@ -120,7 +124,7 @@ def update_task_status(gspread_client, task_id, new_status):
             st.cache_data.clear()
             return
 
-        # --- ALL WORKFLOW LOGIC NOW PROCEEDS FROM HERE ---
+        # --- WORKFLOW LOGIC FOR COMPLETED TASK ---
         
         active_workflow = active_workflows_df[active_workflows_df['ActiveWorkflowID'] == active_workflow_id]
         if active_workflow.empty:
@@ -128,93 +132,130 @@ def update_task_status(gspread_client, task_id, new_status):
             st.cache_data.clear()
             return
         
-        # This is the crucial step: identify the completed step's details
+        # Get workflow details
         aw_sheet = gspread_client.open_by_key(SPREADSHEET_ID).worksheet(ACTIVE_WORKFLOWS_SHEET_NAME)
         aw_cell = aw_sheet.find(active_workflow_id, in_column=1)
-        step_number_just_completed = int(active_workflow.iloc[0].get('Current_Step', 0))
+        current_step = int(active_workflow.iloc[0].get('Current_Step', 0))
         template_id = active_workflow.iloc[0].get('WorkflowID')
         
-        # 1. ADVANCE THE CURRENT WORKFLOW
+        # Get all steps for this workflow
         all_steps = workflow_steps_df[workflow_steps_df['WorkflowID'] == template_id].copy()
         all_steps['Step_Number'] = pd.to_numeric(all_steps['Step_Number'], errors='coerce')
+        all_steps = all_steps.sort_values('Step_Number')
+        
+        total_steps = len(all_steps)
 
-        if step_number_just_completed >= len(all_steps):
+        # 1. ADVANCE THE WORKFLOW AND UPDATE NEXT TASK DATES
+        if current_step >= total_steps:
+            # All steps complete!
             aw_sheet.update_cell(aw_cell.row, active_workflows_df.columns.get_loc('Status') + 1, 'Done')
-            st.success(f"🎉 Workflow {active_workflow_id} completed!")
+            st.success(f"🎉 Workflow {active_workflow_id} completed! All {total_steps} tasks finished.")
         else:
-            aw_sheet.update_cell(aw_cell.row, active_workflows_df.columns.get_loc('Current_Step') + 1, step_number_just_completed + 1)
-            next_step_df = all_steps[all_steps['Step_Number'] == step_number_just_completed + 1]
-            if not next_step_df.empty:
-                next_step = next_step_df.iloc[0]
-                task_headers = tasks_sheet.row_values(1)
-                today = datetime.now()
-                relative_start_days = int(next_step.get('Relative_Start_Date', 0))
-                relative_due_days = int(next_step.get('Relative_Due_Date', 1))
-
-                # Calculate the new start date by offsetting from today
-                start_date_obj = today + timedelta(days=relative_start_days)
-                # Calculate the new due date by offsetting from the new start_date
-                due_date_obj = start_date_obj + timedelta(days=relative_due_days)
-
-                new_task = {
-                    'TaskID': f"TSK-{uuid.uuid4().hex[:6].upper()}",
-                    'Task Name': next_step.get('Step_Name'),
-                    'Status': 'To Do',
-                    'Client': completed_task.get('Client'),
-                    'Start Date': start_date_obj.strftime('%Y-%m-%d'),
-                    'Due Date': due_date_obj.strftime('%Y-%m-%d %H:%M:%S'),
-                    'ActiveWorkflowID': active_workflow_id,
-                    'Estimated Time': next_step.get('Est_Time', 30),
-                    'Enjoyment': next_step.get('Enjoyment', 3),
-                    'Importance': next_step.get('Importance', 3)
-                }
-                tasks_sheet.append_row([new_task.get(h, '') for h in task_headers], value_input_option='USER_ENTERED')
-                st.info(f"✅ Next task in workflow created: '{new_task['Task Name']}'")
+            # Advance to next step
+            next_step_num = current_step + 1
+            aw_sheet.update_cell(aw_cell.row, active_workflows_df.columns.get_loc('Current_Step') + 1, next_step_num)
+            
+            # Find the next task in the workflow (should already exist)
+            next_tasks = tasks_df[
+                (tasks_df['ActiveWorkflowID'] == active_workflow_id) &
+                (pd.to_numeric(tasks_df['Workflow_Step_Number'], errors='coerce') == next_step_num)
+            ]
+            
+            if not next_tasks.empty:
+                # Update the existing next task with calculated dates
+                next_step_df = all_steps[all_steps['Step_Number'] == next_step_num]
+                if not next_step_df.empty:
+                    next_step = next_step_df.iloc[0]
+                    
+                    # Calculate dates based on relative offsets from NOW
+                    today = datetime.now()
+                    relative_start_days = int(next_step.get('Relative_Start_Date', 0))
+                    relative_due_days = int(next_step.get('Relative_Due_Date', 1))
+                    
+                    start_date_obj = today + timedelta(days=relative_start_days)
+                    due_date_obj = start_date_obj + timedelta(days=relative_due_days)
+                    
+                    start_date_str = start_date_obj.strftime('%Y-%m-%d')
+                    due_date_str = due_date_obj.strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    # Find and update the next task
+                    next_task_id = next_tasks.iloc[0]['TaskID']
+                    next_task_cell = tasks_sheet.find(next_task_id, in_column=1)
+                    
+                    if next_task_cell:
+                        try:
+                            start_date_col = tasks_df.columns.get_loc('Start Date') + 1
+                            due_date_col = tasks_df.columns.get_loc('Due Date') + 1
+                            tasks_sheet.update_cell(next_task_cell.row, start_date_col, start_date_str)
+                            tasks_sheet.update_cell(next_task_cell.row, due_date_col, due_date_str)
+                            st.info(f"✅ Dates calculated for next task: '{next_tasks.iloc[0]['Task Name']}'")
+                        except KeyError:
+                            st.warning("Could not update dates for next task (column not found)")
+            else:
+                # This shouldn't happen if workflow was created correctly, but handle gracefully
+                st.warning(f"⚠️ Could not find next task (Step {next_step_num}) for this workflow. The workflow may be incomplete.")
 
         # 2. CHECK IF COMPLETED STEP TRIGGERS A NEW WORKFLOW
-        completed_step_details = all_steps[all_steps['Step_Number'] == step_number_just_completed]
+        current_step_details = all_steps[all_steps['Step_Number'] == current_step]
         
-        if not completed_step_details.empty:
-            new_workflow_template_id = completed_step_details.iloc[0].get('Next_WorkflowID_On_Completion')
+        if not current_step_details.empty:
+            new_workflow_template_id = current_step_details.iloc[0].get('Next_WorkflowID_On_Completion')
             if new_workflow_template_id and pd.notna(new_workflow_template_id) and str(new_workflow_template_id).strip():
                 st.success(f"🚀 Triggering new workflow: '{new_workflow_template_id}'!")
-                # ... (Logic to create new workflow and first task)
+                # Create new workflow with all its tasks
                 aw_headers = aw_sheet.row_values(1)
                 new_active_workflow_id = f"AWF-{uuid.uuid4().hex[:6].upper()}"
-                new_active_workflow = { 'ActiveWorkflowID': new_active_workflow_id, 'WorkflowID': new_workflow_template_id, 'Client': completed_task.get('Client'), 'Start_Date': datetime.now().strftime('%Y-%m-%d'), 'Status': 'In Progress', 'Current_Step': 1 }
+                new_active_workflow = {
+                    'ActiveWorkflowID': new_active_workflow_id,
+                    'WorkflowID': new_workflow_template_id,
+                    'Client': completed_task.get('Client'),
+                    'Start_Date': datetime.now().strftime('%Y-%m-%d'),
+                    'Status': 'In Progress',
+                    'Current_Step': 1
+                }
                 aw_sheet.append_row([new_active_workflow.get(h, '') for h in aw_headers], value_input_option='USER_ENTERED')
-                st.info(f"Added new entry to Active_Workflows with ID: {new_active_workflow_id}")
-
-                first_step_df = workflow_steps_df[(workflow_steps_df['WorkflowID'] == new_workflow_template_id) & (pd.to_numeric(workflow_steps_df['Step_Number']) == 1)]
-                if not first_step_df.empty:
-                    first_step = first_step_df.iloc[0]
-                    task_headers = tasks_sheet.row_values(1)
-                    today = datetime.now()
-                    # Get the relative offsets from the workflow step, defaulting to 0 for the start date
-                    relative_start_days = int(first_step.get('Relative_Start_Date', 0))
-                    relative_due_days = int(first_step.get('Relative_Due_Date', 1))
-
-                    # Calculate the new start date by offsetting from today
-                    start_date_obj = today + timedelta(days=relative_start_days)
-                    # Calculate the new due date by offsetting from the new start_date
-                    due_date_obj = start_date_obj + timedelta(days=relative_due_days)
-
+                st.info(f"Added new Active_Workflow with ID: {new_active_workflow_id}")
+                
+                # Create all tasks for the new workflow
+                new_workflow_steps = workflow_steps_df[workflow_steps_df['WorkflowID'] == new_workflow_template_id].copy()
+                new_workflow_steps['Step_Number'] = pd.to_numeric(new_workflow_steps['Step_Number'], errors='coerce')
+                new_workflow_steps = new_workflow_steps.sort_values('Step_Number')
+                
+                today = datetime.now()
+                for _, new_step in new_workflow_steps.iterrows():
+                    step_number = int(new_step['Step_Number'])
+                    
+                    if step_number == 1:
+                        relative_start_days = int(new_step.get('Relative_Start_Date', 0))
+                        relative_due_days = int(new_step.get('Relative_Due_Date', 1))
+                        start_date = today + timedelta(days=relative_start_days)
+                        due_date = start_date + timedelta(days=relative_due_days)
+                        start_date_str = start_date.strftime('%Y-%m-%d')
+                        due_date_str = due_date.strftime('%Y-%m-%d %H:%M:%S')
+                    else:
+                        start_date_str = ''
+                        due_date_str = ''
+                    
                     new_task = {
                         'TaskID': f"TSK-{uuid.uuid4().hex[:6].upper()}",
-                        'Task Name': first_step.get('Step_Name'),
+                        'Task Name': new_step.get('Step_Name'),
                         'Status': 'To Do',
                         'Client': completed_task.get('Client'),
-                        'Start Date': start_date_obj.strftime('%Y-%m-%d'),
-                        'Due Date': due_date_obj.strftime('%Y-%m-%d %H:%M:%S'),
+                        'Start Date': start_date_str,
+                        'Due Date': due_date_str,
                         'ActiveWorkflowID': new_active_workflow_id,
-                        'Estimated Time': first_step.get('Est_Time', 30),
-                        'Enjoyment': first_step.get('Enjoyment', 3),
-                        'Importance': first_step.get('Importance', 3)
+                        'Estimated Time': new_step.get('Est_Time', 0),
+                        'Enjoyment': new_step.get('Enjoyment', 3),
+                        'Importance': new_step.get('Importance', 3),
+                        'Workflow_Step_Number': step_number
                     }
-                    tasks_sheet.append_row([new_task.get(h, '') for h in task_headers], value_input_option='USER_ENTERED')
-                    st.success(f"✅ First task for new workflow created: '{new_task['Task Name']}'")
-                else:
-                    st.error(f"🛑 CRITICAL: Workflow '{new_workflow_template_id}' was triggered, but no 'Step 1' could be found!")
+                    
+                    task_row = [new_task.get(h, '') for h in aw_headers if h in new_task]
+                    task_headers = tasks_sheet.row_values(1)
+                    task_row = [new_task.get(h, '') for h in task_headers]
+                    tasks_sheet.append_row(task_row, value_input_option='USER_ENTERED')
+                
+                st.success(f"✅ Created {len(new_workflow_steps)} tasks for new workflow!")
         
         st.cache_data.clear()
 
@@ -407,24 +448,27 @@ def create_task(gspread_client, task_details):
 
 def start_workflow(gspread_client, gmail_service, workflow_details):
     """
-    Starts a new workflow: adds a record to 'Active_Workflows',
-    creates the first task in the 'Tasks' sheet, and archives the source email.
+    Starts a new workflow: adds ALL tasks to 'Tasks' sheet (not just the first one),
+    creates a record in 'Active_Workflows', and archives the source email.
+    
+    Only the first task gets initial start/due dates.
+    Subsequent tasks will have their dates calculated when the previous task is completed.
     """
     try:
-        # 1. Fetch all necessary dataframes once
+        # 1. Fetch workflow steps
         steps_df = fetch_sheet_data(gspread_client, WORKFLOW_STEPS_SHEET_NAME)
         
-        # 2. Find the first step of the selected workflow template
+        # 2. Get the workflow template ID and find all steps
         template_id = int(workflow_details['workflow_template_id'])
-        first_step = steps_df[(steps_df['WorkflowID'] == template_id) & (steps_df['Step_Number'] == 1)]
+        workflow_steps = steps_df[steps_df['WorkflowID'] == template_id].copy()
+        workflow_steps['Step_Number'] = pd.to_numeric(workflow_steps['Step_Number'], errors='coerce')
+        workflow_steps = workflow_steps.sort_values('Step_Number')
         
-        if first_step.empty:
-            st.error(f"Could not find the starting step for Workflow ID {template_id}.")
+        if workflow_steps.empty:
+            st.error(f"Could not find any steps for Workflow ID {template_id}.")
             return
 
-        step_info = first_step.iloc[0]
-
-        # 3. Create the new Active Workflow record
+        # 3. Create the Active Workflow record
         active_workflows_sheet = gspread_client.open_by_key(SPREADSHEET_ID).worksheet(ACTIVE_WORKFLOWS_SHEET_NAME)
         awf_id = f"AWF-{uuid.uuid4().hex[:6].upper()}"
         external_deadline = workflow_details.get('external_deadline')
@@ -435,35 +479,60 @@ def start_workflow(gspread_client, gmail_service, workflow_details):
             template_id,
             workflow_details.get('client', ''),
             "In Progress",
-            1, # Starts at step 1
+            1,  # Current step starts at 1
             deadline_str
         ]
         active_workflows_sheet.append_row(new_workflow_row, value_input_option='USER_ENTERED')
         
-        # 4. Calculate start and due dates for the first task
+        # 4. Create ALL tasks for this workflow
+        tasks_sheet = gspread_client.open_by_key(SPREADSHEET_ID).worksheet(TASKS_SHEET_NAME)
+        task_headers = tasks_sheet.row_values(1)
         today = datetime.now()
-        start_date = today + timedelta(days=int(step_info.get('Relative_Start_Date', 0)))
-        due_date = start_date + timedelta(days=int(step_info.get('Relative_Due_Date', 1)))
-
-        # 5. Create the first task for the workflow
-        task_details_for_creation = {
-            'name': step_info['Step_Name'],
-            'client': workflow_details.get('client', ''),
-            'start_date': start_date,
-            'due_date': due_date,
-            'est_time': step_info.get('Est_Time', 0),
-            'enjoyment': step_info.get('Enjoyment', 3),
-            'importance': step_info.get('Importance', 3),
-            'workflow_id': awf_id,
-            'assignee': workflow_details.get('assignee', '')
-        }
-        create_task(gspread_client, task_details_for_creation)
-
-        # 6. Archive the original communication if it exists
+        
+        for idx, (_, step) in enumerate(workflow_steps.iterrows()):
+            step_number = int(step['Step_Number'])
+            
+            if step_number == 1:
+                # First task: calculate dates based on relative offsets
+                relative_start_days = int(step.get('Relative_Start_Date', 0))
+                relative_due_days = int(step.get('Relative_Due_Date', 1))
+                start_date = today + timedelta(days=relative_start_days)
+                due_date = start_date + timedelta(days=relative_due_days)
+                start_date_str = start_date.strftime('%Y-%m-%d')
+                due_date_str = due_date.strftime('%Y-%m-%d %H:%M:%S')
+                task_status = 'To Do'
+            else:
+                # Subsequent tasks: leave dates empty, mark as pending
+                start_date_str = ''
+                due_date_str = ''
+                task_status = 'To Do'  # Will remain 'To Do' until predecessor is completed
+            
+            new_task = {
+                'TaskID': f"TSK-{uuid.uuid4().hex[:6].upper()}",
+                'Task Name': step.get('Step_Name'),
+                'Status': task_status,
+                'Client': workflow_details.get('client', ''),
+                'Start Date': start_date_str,
+                'Due Date': due_date_str,
+                'ActiveWorkflowID': awf_id,
+                'Estimated Time': step.get('Est_Time', 0),
+                'Enjoyment': step.get('Enjoyment', 3),
+                'Importance': step.get('Importance', 3),
+                'Workflow_Step_Number': step_number  # Track which step this task is
+            }
+            
+            # Build the row in the correct order
+            task_row = []
+            for header in task_headers:
+                task_row.append(new_task.get(header, ''))
+            
+            tasks_sheet.append_row(task_row, value_input_option='USER_ENTERED')
+        
+        st.success(f"Workflow started! Created {len(workflow_steps)} tasks for client '{workflow_details.get('client')}'.")
+        
+        # 5. Archive the original communication if it exists
         if workflow_details.get('message_id'):
             archive_message(gmail_service, gspread_client, workflow_details['message_id'])
-
-        st.success(f"Workflow started successfully for client '{workflow_details.get('client')}'!")
 
     except Exception as e:
         st.error(f"Failed to start workflow: {e}")

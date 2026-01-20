@@ -28,7 +28,6 @@ from quietude import (
 import plan_my_day as planner
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Command Center")
 GSHEET_URL = "https://docs.google.com/spreadsheets/d/1o5LmRv4MUQmO84bouTiBdqFzZu-lqx8V_YDVSBSsi2c/edit?gid=2070779982#gid=2070779982"
 st.link_button("🚀 Open Quietude OS Google Sheet", GSHEET_URL)
 st.title("🎯 Command Center")
@@ -137,8 +136,17 @@ try:
 
     if 'action_queue' not in st.session_state or st.button("🔄 Fetch New Batch"):
         with st.spinner("Fetching a new batch of actions..."):
-            run_fetch_communications(gmail_service, gspread_client)
-            fetch_and_prepare_action_batch(gspread_client)
+            # Try to fetch new emails, but don't crash if Gmail API fails
+            try:
+                run_fetch_communications(gmail_service, gspread_client)
+            except Exception as e:
+                st.warning(f"⚠️ Could not fetch new emails, but will show cached communications.")
+            
+            # Always try to prepare the batch from whatever data is available
+            try:
+                fetch_and_prepare_action_batch(gspread_client)
+            except Exception as e:
+                st.error(f"Error preparing action batch: {str(e)[:150]}")
 
     if not st.session_state.get('action_queue'):
         st.success("🎉 Batch complete! Fetch a new batch when you're ready.")
@@ -151,7 +159,7 @@ try:
             comm = next_item['data']
             msg_id = comm['MessageID']
             st.subheader(f"Next Up: Respond to Communication")
-            with st.container(border=True):
+            with st.container():
                 col1, col2 = st.columns([3, 1])
                 with col1:
                     st.write(f"**From:** {comm.get('Sender')}")
@@ -162,8 +170,11 @@ try:
                     st.link_button("✉️ Open in Gmail", gmail_link, use_container_width=True)
 
                 with st.spinner("Loading message..."):
-                    body_html = fetch_message_body(gmail_service, msg_id)
-                    st.components.v1.html(body_html, height=400, width=1200, scrolling=True)
+                    try:
+                        body_html = fetch_message_body(gmail_service, msg_id)
+                        st.components.v1.html(body_html, height=400, width=1200, scrolling=True)
+                    except Exception as e:
+                        st.warning(f"⚠️ Could not load message body: {str(e)[:100]}")
             st.markdown("---")
             st.subheader("Actions")
             
@@ -176,15 +187,22 @@ try:
             if col3.button("Create Task", key=f"task_{msg_id}", use_container_width=True):
                 st.session_state[f'show_task_form_{msg_id}'] = not st.session_state.get(f'show_task_form_{msg_id}', False)
             if col4.button("Archive", key=f"archive_{msg_id}", use_container_width=True, type="primary"):
-                archive_message(gmail_service, gspread_client, msg_id)
+                try:
+                    archive_message(gmail_service, gspread_client, msg_id)
+                except Exception as e:
+                    st.warning(f"⚠️ Could not archive: {str(e)[:100]}")
                 if st.session_state.action_queue:
                     st.session_state.action_queue = st.session_state.action_queue[1:]
                 st.rerun()
             if col5.button("Unsubscribe/Report Spam", key=f"report_spam_{msg_id}", use_container_width=True, type="primary"):
-                report_spam(gmail_service, gspread_client, msg_id)    
+                try:
+                    report_spam(gmail_service, gspread_client, msg_id)
+                except Exception as e:
+                    st.warning(f"⚠️ Could not report spam: {str(e)[:100]}")
                 if st.session_state.action_queue:
                     st.session_state.action_queue = st.session_state.action_queue[1:]
-                st.session_state.action_queue.pop(0)
+                    if st.session_state.action_queue:
+                        st.session_state.action_queue.pop(0)
                 st.rerun()
 
             # Action Forms
@@ -193,8 +211,11 @@ try:
                     st.subheader("Send Reply")
                     reply_text = st.text_area("Your reply:", height=200)
                     if st.form_submit_button("Send"):
-                        send_reply(gspread_client, gmail_service, {"message_id": msg_id, "recipient": comm.get('Sender'), "subject": comm.get('Subject/Snippet'), "body": reply_text})
-                        st.session_state.action_queue.pop(0)
+                        try:
+                            send_reply(gspread_client, gmail_service, {"message_id": msg_id, "recipient": comm.get('Sender'), "subject": comm.get('Subject/Snippet'), "body": reply_text})
+                            st.session_state.action_queue.pop(0)
+                        except Exception as e:
+                            st.error(f"Failed to send reply: {str(e)[:150]}")
                         st.rerun()
 
             if st.session_state.get(f'show_workflow_form_{msg_id}', False):
@@ -205,9 +226,12 @@ try:
                     external_deadline = st.date_input("External Deadline (Optional)", value=None)
                     assignee = st.selectbox("Assign To", options=user_list)
                     if st.form_submit_button("Start Workflow"):
-                        workflow_details = {'workflow_template_id': workflow_options[selected_workflow_name], 'client': selected_client, 'external_deadline': external_deadline, 'assignee': assignee, 'message_id': msg_id}
-                        start_workflow(gspread_client, gmail_service, workflow_details)
-                        st.session_state.action_queue.pop(0)
+                        try:
+                            workflow_details = {'workflow_template_id': workflow_options[selected_workflow_name], 'client': selected_client, 'external_deadline': external_deadline, 'assignee': assignee, 'message_id': msg_id}
+                            start_workflow(gspread_client, gmail_service, workflow_details)
+                            st.session_state.action_queue.pop(0)
+                        except Exception as e:
+                            st.error(f"Failed to start workflow: {str(e)[:150]}")
                         st.rerun()
 
             if st.session_state.get(f'show_task_form_{msg_id}', False):
@@ -228,23 +252,26 @@ try:
                     reply_text = st.text_area("Reply to client:", height=150)
 
                     if st.form_submit_button("Save Task and Reply"):
-                        task_details = {
-                            "name": task_name, "client": task_client, "assignee": task_assignee,
-                            "start_date": start_date, "due_date": due_date, "est_time": est_time,
-                            "enjoyment": enjoyment, "importance": importance, "notes": notes,
-                            "link": f"https://mail.google.com/mail/u/0/#inbox/{msg_id}"
-                        }
-                        create_task(gspread_client, task_details)
-                        
-                        # Send reply if text is provided, otherwise just archive
-                        if reply_text:
-                            send_reply(gspread_client, gmail_service, {
-                                "message_id": msg_id, "recipient": comm.get('Sender'),
-                                "subject": comm.get('Subject/Snippet'), "body": reply_text
-                            })
-                        else:
-                            archive_message(gmail_service, gspread_client, msg_id)
-                        st.session_state.action_queue.pop(0)
+                        try:
+                            task_details = {
+                                "name": task_name, "client": task_client, "assignee": task_assignee,
+                                "start_date": start_date, "due_date": due_date, "est_time": est_time,
+                                "enjoyment": enjoyment, "importance": importance, "notes": notes,
+                                "link": f"https://mail.google.com/mail/u/0/#inbox/{msg_id}"
+                            }
+                            create_task(gspread_client, task_details)
+                            
+                            # Send reply if text is provided, otherwise just archive
+                            if reply_text:
+                                send_reply(gspread_client, gmail_service, {
+                                    "message_id": msg_id, "recipient": comm.get('Sender'),
+                                    "subject": comm.get('Subject/Snippet'), "body": reply_text
+                                })
+                            else:
+                                archive_message(gmail_service, gspread_client, msg_id)
+                            st.session_state.action_queue.pop(0)
+                        except Exception as e:
+                            st.error(f"Failed to create task: {str(e)[:150]}")
                         st.rerun()
 
         # --- RENDER TASK UI ---
@@ -252,7 +279,7 @@ try:
             task = next_item['data']
             task_id = task['TaskID']
             st.subheader(f"Next Up: Complete Task")
-            with st.container(border=True):
+            with st.container():
                 st.write(f"**Task:** {task.get('Task Name')} | **Client:** {task.get('Client', 'N/A')}")
                 st.error(f"**Due Date:** {task.get('Due Date')}")
             st.markdown("---")
@@ -260,9 +287,21 @@ try:
             
             col1, col2, col3, col4, col5 = st.columns(5)
             if col1.button("Mark as Completed", key=f"complete_{task_id}", use_container_width=True, type="primary"):
-                update_task_status(gspread_client, task_id, "Done"); st.session_state.action_queue.pop(0); st.rerun()
+                try:
+                    update_task_status(gspread_client, task_id, "Done")
+                except Exception as e:
+                    st.error(f"Failed to mark task complete: {str(e)[:150]}")
+                if st.session_state.action_queue:
+                    st.session_state.action_queue.pop(0)
+                st.rerun()
             if col2.button("Waiting for Client", key=f"waiting_{task_id}", use_container_width=True):
-                set_task_waiting(gspread_client, task_id); st.session_state.action_queue.pop(0); st.rerun()
+                try:
+                    set_task_waiting(gspread_client, task_id)
+                except Exception as e:
+                    st.error(f"Failed to set task waiting: {str(e)[:150]}")
+                if st.session_state.action_queue:
+                    st.session_state.action_queue.pop(0)
+                st.rerun()
             if col3.button("Snooze", key=f"snooze_{task_id}", use_container_width=True):
                  st.session_state[f'show_task_snooze_{task_id}'] = not st.session_state.get(f'show_task_snooze_{task_id}', False)
                  st.rerun()
@@ -280,27 +319,42 @@ try:
                 
                 with s_col1:
                     if st.button("1 Hour", key=f"snooze_1hr_{task_id}", use_container_width=True):
-                        snooze_task(gspread_client, task_id, timedelta(hours=1))
-                        st.session_state.action_queue.pop(0)
+                        try:
+                            snooze_task(gspread_client, task_id, timedelta(hours=1))
+                        except Exception as e:
+                            st.error(f"Failed to snooze: {str(e)[:150]}")
+                        if st.session_state.action_queue:
+                            st.session_state.action_queue.pop(0)
                         st.rerun()
                 
                 with s_col2:
                     if st.button("Tomorrow", key=f"snooze_day_{task_id}", use_container_width=True):
-                        snooze_task(gspread_client, task_id, timedelta(days=1))
-                        st.session_state.action_queue.pop(0)
+                        try:
+                            snooze_task(gspread_client, task_id, timedelta(days=1))
+                        except Exception as e:
+                            st.error(f"Failed to snooze: {str(e)[:150]}")
+                        if st.session_state.action_queue:
+                            st.session_state.action_queue.pop(0)
                         st.rerun()
 
                 with s_col3:
                     if st.button("1 Week", key=f"snooze_week_{task_id}", use_container_width=True):
-                        snooze_task(gspread_client, task_id, timedelta(weeks=1))
-                        st.session_state.action_queue.pop(0)
+                        try:
+                            snooze_task(gspread_client, task_id, timedelta(weeks=1))
+                        except Exception as e:
+                            st.error(f"Failed to snooze: {str(e)[:150]}")
+                        if st.session_state.action_queue:
+                            st.session_state.action_queue.pop(0)
                         st.rerun()
 
                 with s_col4:
                     if st.button("1 Month", key=f"snooze_month_{task_id}", use_container_width=True):
-                        # Approximating 1 month as 30 days
-                        snooze_task(gspread_client, task_id, timedelta(days=30))
-                        st.session_state.action_queue.pop(0)
+                        try:
+                            snooze_task(gspread_client, task_id, timedelta(days=30))
+                        except Exception as e:
+                            st.error(f"Failed to snooze: {str(e)[:150]}")
+                        if st.session_state.action_queue:
+                            st.session_state.action_queue.pop(0)
                         st.rerun()
 
             if st.session_state.get(f'show_reassign_{task_id}', False):
@@ -308,8 +362,12 @@ try:
                     st.subheader(f"Reassign Task: {task.get('Task Name')}")
                     new_assignee = st.selectbox("New Assignee", options=user_list)
                     if st.form_submit_button("Save Assignment"):
-                        reassign_task(gspread_client, task_id, new_assignee)
-                        st.session_state.action_queue.pop(0)
+                        try:
+                            reassign_task(gspread_client, task_id, new_assignee)
+                        except Exception as e:
+                            st.error(f"Failed to reassign: {str(e)[:150]}")
+                        if st.session_state.action_queue:
+                            st.session_state.action_queue.pop(0)
                         st.rerun()
 
             if st.session_state.get(f'show_add_note_{task_id}', False):
@@ -317,7 +375,13 @@ try:
                     st.subheader(f"Add Note to: {task.get('Task Name')}")
                     note_text = st.text_area("New Note")
                     if st.form_submit_button("Add Note"):
-                        add_note_to_task(gspread_client, task_id, note_text)
+                        try:
+                            add_note_to_task(gspread_client, task_id, note_text)
+                        except Exception as e:
+                            st.error(f"Failed to add note: {str(e)[:150]}")
+                        if st.session_state.action_queue:
+                            st.session_state.action_queue.pop(0)
+                        st.rerun()
                         st.session_state[f'show_add_note_{task_id}'] = False
                         st.rerun()
 

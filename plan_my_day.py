@@ -2,12 +2,11 @@ import os.path
 import streamlit as st
 import pandas as pd
 import gspread
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from datetime import datetime, time, timedelta, timezone
 from dateutil import parser as date_parser
+import json
 
 # --- CONFIGURATION ---
 SPREADSHEET_ID = st.secrets["SPREADSHEET_ID"]
@@ -38,18 +37,18 @@ SCOPES = [
 
 # --- AUTHENTICATION ---
 def authenticate_google():
-    """Handles Google authentication for Sheets and Calendar APIs."""
-    creds = None
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+    """Handles Google authentication for Sheets and Calendar APIs using service account."""
+    # Try to load from credentials.json file first (for local development)
+    # Fall back to Streamlit secrets for cloud deployment
+    try:
+        if os.path.exists('.streamlit/credentials.json'):
+            creds = Credentials.from_service_account_file('.streamlit/credentials.json', scopes=SCOPES)
         else:
-            flow = InstalledAppFlow.from_client_secrets_file('.streamlit/credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
+            client_secrets_dict = json.loads(st.secrets["GOOGLE_CLIENT_SECRETS"])
+            creds = Credentials.from_service_account_info(client_secrets_dict, scopes=SCOPES)
+    except Exception as e:
+        st.error(f"Authentication failed: {e}")
+        raise
     
     gspread_client = gspread.authorize(creds)
     calendar_service = build('calendar', 'v3', credentials=creds)

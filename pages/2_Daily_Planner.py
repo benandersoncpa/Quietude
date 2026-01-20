@@ -10,7 +10,6 @@ from quietude import (
     run_fetch_communications
 )
 
-st.set_page_config(layout="wide")
 st.title("🗓️ Daily Planner")
 st.link_button("🚀 Open Quietude OS Google Sheet", "https://docs.google.com/spreadsheets/d/1o5LmRv4MUQmO84bouTiBdqFzZu-lqx8V_YDVSBSsi2c/edit?gid=0#gid=0")
 

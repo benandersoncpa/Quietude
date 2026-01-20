@@ -165,7 +165,6 @@ def send_reply(gspread_client, gmail_service, details):
 
 
 # --- MAIN UI ---
-st.set_page_config(layout="wide")
 st.title("📡 Quietude Command Center")
 st.link_button("🚀 Open Quietude OS Google Sheet", "https://docs.google.com/spreadsheets/d/1o5LmRv4MUQmO84bouTiBdqFzZu-lqx8V_YDVSBSsi2c/edit?gid=0#gid=0")
 

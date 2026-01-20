@@ -2,9 +2,7 @@ import streamlit as st
 import pandas as pd
 import streamlit as st
 import gspread
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2.service_account import Credentials
 import os.path
 from datetime import datetime, timedelta, timezone
 import base64
@@ -18,6 +16,7 @@ from email import encoders
 from email.utils import parsedate_to_datetime
 import plan_my_day as planner
 import traceback
+import json
 
 # --- CONFIGURATION ---
 COMMUNICATIONS_SHEET_NAME = 'Communications'
@@ -45,17 +44,17 @@ SCOPES = [
 # --- AUTHENTICATION FUNCTION (SHARED) ---
 @st.cache_resource
 def authenticate_google():
-    creds = None
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+    # Try to load from credentials.json file first (for local development)
+    # Fall back to Streamlit secrets for cloud deployment
+    try:
+        if os.path.exists('.streamlit/credentials.json'):
+            creds = Credentials.from_service_account_file('.streamlit/credentials.json', scopes=SCOPES)
         else:
-            flow = InstalledAppFlow.from_client_secrets_file('.streamlit/credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
+            client_secrets_dict = json.loads(st.secrets["GOOGLE_CLIENT_SECRETS"])
+            creds = Credentials.from_service_account_info(client_secrets_dict, scopes=SCOPES)
+    except Exception as e:
+        st.error(f"Authentication failed: {e}")
+        raise
     gspread_client = gspread.authorize(creds)
     gmail_service = build('gmail', 'v1', credentials=creds)
     sheets_service = build('sheets', 'v4', credentials=creds)
@@ -220,48 +219,120 @@ def update_task_status(gspread_client, task_id, new_status):
         st.code(traceback.format_exc())
 
 
-def run_fetch_communications(gmail_service, gspread_client):
-    try:
-        spreadsheet = gspread_client.open_by_key(SPREADSHEET_ID)
-        worksheet = spreadsheet.worksheet(COMMUNICATIONS_SHEET_NAME)
-        existing_ids = set(worksheet.col_values(1))
-        all_messages = []
-        page_token = None
-        while True:
-            results = gmail_service.users().messages().list(userId='me', q='in:inbox newer_than:7d', maxResults=500, pageToken=page_token).execute()
-            messages = results.get('messages', [])
-            all_messages.extend(messages)
-            page_token = results.get('nextPageToken')
-            if not page_token: break
-        if not all_messages:
-            st.toast("✅ No new messages found in the last 7 days.")
-            return
-        rows_to_add = []
-        for message_info in all_messages:
-            msg_id = message_info['id']
-            if msg_id in existing_ids: continue
-            msg = gmail_service.users().messages().get(userId='me', id=msg_id, format='metadata').execute()
-            headers = msg.get('payload', {}).get('headers', [])
-            subject = next((h['value'] for h in headers if h['name'].lower() == 'subject'), '')
-            sender = next((h['value'] for h in headers if h['name'].lower() == 'from'), '')
-            date = next((h['value'] for h in headers if h['name'].lower() == 'date'), '')
-            label_ids = msg.get('labelIds', [])
-            source = '1099 Email'
-            if LABEL_ID_AEGIS_EMAIL in label_ids: source = 'Aegis Email'
-            elif LABEL_ID_PERSONAL_EMAIL in label_ids: source = 'Personal Email'
-            elif LABEL_ID_AEGIS_GV in label_ids: source = 'Google Voice - Aegis'
-            elif LABEL_ID_1099_GV in label_ids: source = 'Google Voice - 1099'
-            rows_to_add.append([msg_id, date, source, sender, subject, 'Needs Review', ''])
-            existing_ids.add(msg_id)
-        if rows_to_add:
-            worksheet.append_rows(rows_to_add, value_input_option='USER_ENTERED')
-            st.toast(f"📥 Fetched and logged {len(rows_to_add)} new communication(s)!")
-        else:
-            st.toast("✅ No new communications to log (all recent emails are already in the sheet).")
-    except HttpError as error:
-        st.error(f'An API error occurred: {error}')
-    except Exception as e:
-        st.error(f'An unexpected error occurred: {e}')
+def run_fetch_communications(gmail_service, gspread_client, max_retries=2):
+    """
+    Fetches recent emails with robust error handling and retry logic.
+    If fetch fails, returns gracefully without crashing the app.
+    """
+    import time
+    
+    for attempt in range(max_retries):
+        try:
+            spreadsheet = gspread_client.open_by_key(SPREADSHEET_ID)
+            worksheet = spreadsheet.worksheet(COMMUNICATIONS_SHEET_NAME)
+            existing_ids = set(worksheet.col_values(1))
+            all_messages = []
+            page_token = None
+            
+            while True:
+                try:
+                    results = gmail_service.users().messages().list(
+                        userId='me', 
+                        q='in:inbox newer_than:7d', 
+                        maxResults=500, 
+                        pageToken=page_token
+                    ).execute()
+                    
+                    messages = results.get('messages', [])
+                    all_messages.extend(messages)
+                    page_token = results.get('nextPageToken')
+                    if not page_token: 
+                        break
+                        
+                except HttpError as e:
+                    if e.resp.status == 403:
+                        # Precondition failed or quota exceeded - wait and retry
+                        if attempt < max_retries - 1:
+                            wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s, etc.
+                            st.warning(f"⚠️ Gmail API temporarily unavailable. Retrying in {wait_time}s... (Attempt {attempt + 1}/{max_retries})")
+                            time.sleep(wait_time)
+                            break  # Break inner loop to retry outer loop
+                        else:
+                            # Final attempt failed - show warning but don't crash
+                            st.warning("⚠️ Gmail API unavailable. Using previously cached communications. Please try again later.")
+                            return False
+                    else:
+                        raise
+            
+            if not all_messages:
+                st.toast("✅ No new messages found in the last 7 days.")
+                return True
+            
+            rows_to_add = []
+            for message_info in all_messages:
+                msg_id = message_info['id']
+                if msg_id in existing_ids: 
+                    continue
+                    
+                try:
+                    msg = gmail_service.users().messages().get(
+                        userId='me', 
+                        id=msg_id, 
+                        format='metadata'
+                    ).execute()
+                    
+                    headers = msg.get('payload', {}).get('headers', [])
+                    subject = next((h['value'] for h in headers if h['name'].lower() == 'subject'), '')
+                    sender = next((h['value'] for h in headers if h['name'].lower() == 'from'), '')
+                    date = next((h['value'] for h in headers if h['name'].lower() == 'date'), '')
+                    label_ids = msg.get('labelIds', [])
+                    
+                    source = '1099 Email'
+                    if LABEL_ID_AEGIS_EMAIL in label_ids: 
+                        source = 'Aegis Email'
+                    elif LABEL_ID_PERSONAL_EMAIL in label_ids: 
+                        source = 'Personal Email'
+                    elif LABEL_ID_AEGIS_GV in label_ids: 
+                        source = 'Google Voice - Aegis'
+                    elif LABEL_ID_1099_GV in label_ids: 
+                        source = 'Google Voice - 1099'
+                    
+                    rows_to_add.append([msg_id, date, source, sender, subject, 'Needs Review', ''])
+                    existing_ids.add(msg_id)
+                    
+                except HttpError as e:
+                    if e.resp.status == 403:
+                        # Skip this individual message and continue
+                        continue
+                    else:
+                        raise
+            
+            if rows_to_add:
+                try:
+                    worksheet.append_rows(rows_to_add, value_input_option='USER_ENTERED')
+                    st.toast(f"📥 Fetched and logged {len(rows_to_add)} new communication(s)!")
+                except Exception as e:
+                    st.warning(f"⚠️ Fetched {len(rows_to_add)} emails but couldn't save all: {str(e)[:100]}")
+            else:
+                st.toast("✅ No new communications to log (all recent emails are already in the sheet).")
+            
+            return True
+            
+        except HttpError as error:
+            if error.resp.status == 403 and attempt < max_retries - 1:
+                wait_time = 2 ** attempt
+                st.warning(f"⚠️ Gmail API temporarily unavailable. Retrying... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+                continue
+            else:
+                st.warning(f"⚠️ Gmail API unavailable ({error.resp.status}). Using cached communications.")
+                return False
+                
+        except Exception as e:
+            st.warning(f"⚠️ Could not fetch communications: {str(e)[:150]}. Using cached data instead.")
+            return False
+    
+    return False
 
 def fetch_message_body(_gmail_service, msg_id, clean=False):
     try:

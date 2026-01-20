@@ -17,7 +17,6 @@ from quietude import (
 )
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Task Dashboard")
 st.title("✅ Task Dashboard")
 st.link_button("🚀 Open Quietude OS Google Sheet", "https://docs.google.com/spreadsheets/d/1o5LmRv4MUQmO84bouTiBdqFzZu-lqx8V_YDVSBSsi2c/edit?gid=0#gid=0")
 st.markdown("View and manage all of your tasks in one place.")
@@ -106,7 +105,7 @@ else:
                         due_date_str = task['Due Date'].strftime('%b %d, %Y')
 
                     # Use st.container with border instead of expander for immediate visibility
-                    with st.container(border=True):
+                    with st.container():
                         main_col, action_col = st.columns([3, 1])
 
                         # --- Main column with task details ---

@@ -16,7 +16,6 @@ from quietude import (
 )
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(layout="wide", page_title="Client Center")
 st.title("👥 Client Center")
 st.link_button("🚀 Open Quietude OS Google Sheet", "https://docs.google.com/spreadsheets/d/1o5LmRv4MUQmO84bouTiBdqFzZu-lqx8V_YDVSBSsi2c/edit?gid=0#gid=0")
 st.markdown("Tasks grouped by Client.")
@@ -120,7 +119,7 @@ else:
                             due_date_str = task['Due Date'].strftime('%b %d') if pd.notna(task['Due Date']) else 'No Date'
                             
                             # Use a container for the task row
-                            with st.container(border=True):
+                            with st.container():
                                 col_details, col_actions = st.columns([4, 2])
                                 
                                 with col_details:

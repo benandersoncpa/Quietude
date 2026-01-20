@@ -2,13 +2,12 @@ import os.path
 import gspread
 import streamlit as st
 import streamlit as st
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+import json
 
 # --- CONFIGURATION ---
 COMMUNICATIONS_SHEET_NAME = 'Communications'
@@ -106,17 +105,17 @@ def run_fetch_communications(gmail_service, gspread_client, cli_mode=False):
 
 def main():
     """Handles authentication and runs the fetch process in command-line mode."""
-    creds = None
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+    # Try to load from credentials.json file first (for local development)
+    # Fall back to Streamlit secrets for cloud deployment
+    try:
+        if os.path.exists('.streamlit/credentials.json'):
+            creds = Credentials.from_service_account_file('.streamlit/credentials.json', scopes=SCOPES)
         else:
-            flow = InstalledAppFlow.from_client_secrets_file('.streamlit/credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
+            client_secrets_dict = json.loads(st.secrets["GOOGLE_CLIENT_SECRETS"])
+            creds = Credentials.from_service_account_info(client_secrets_dict, scopes=SCOPES)
+    except Exception as e:
+        print(f"Authentication failed: {e}")
+        raise
 
     gspread_client = gspread.authorize(creds)
     gmail_service = build('gmail', 'v1', credentials=creds)

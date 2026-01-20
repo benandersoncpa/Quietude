@@ -669,6 +669,70 @@ def get_current_focus_info(schedule):
                 tasks_in_block.append(item)
     return current_block, tasks_in_block
 
+def complete_legacy_workflow(gspread_client, active_workflow_id):
+    """
+    Completes legacy workflows that only have the first task created.
+    Creates all remaining tasks in the workflow with empty dates.
+    """
+    try:
+        active_workflows_df = fetch_sheet_data(gspread_client, ACTIVE_WORKFLOWS_SHEET_NAME)
+        workflow_steps_df = fetch_sheet_data(gspread_client, WORKFLOW_STEPS_SHEET_NAME)
+        tasks_df = fetch_sheet_data(gspread_client, TASKS_SHEET_NAME)
+        
+        active_workflow = active_workflows_df[active_workflows_df['ActiveWorkflowID'] == active_workflow_id]
+        if active_workflow.empty:
+            st.error(f"Workflow {active_workflow_id} not found.")
+            return False
+        
+        template_id = active_workflow.iloc[0].get('WorkflowID')
+        workflow_steps = workflow_steps_df[workflow_steps_df['WorkflowID'] == template_id].copy()
+        workflow_steps['Step_Number'] = pd.to_numeric(workflow_steps['Step_Number'], errors='coerce')
+        workflow_steps = workflow_steps.sort_values('Step_Number')
+        
+        # Find which steps already have tasks
+        existing_tasks = tasks_df[tasks_df['ActiveWorkflowID'] == active_workflow_id]
+        existing_step_numbers = set(pd.to_numeric(existing_tasks.get('Workflow_Step_Number', []), errors='coerce').dropna())
+        
+        # Create tasks for missing steps
+        tasks_sheet = gspread_client.open_by_key(SPREADSHEET_ID).worksheet(TASKS_SHEET_NAME)
+        task_headers = tasks_sheet.row_values(1)
+        client = active_workflow.iloc[0].get('Client', '')
+        
+        tasks_created = 0
+        for _, step in workflow_steps.iterrows():
+            step_number = int(step['Step_Number'])
+            if step_number not in existing_step_numbers:
+                # Create this task
+                new_task = {
+                    'TaskID': f"TSK-{uuid.uuid4().hex[:6].upper()}",
+                    'Task Name': step.get('Step_Name'),
+                    'Status': 'To Do',
+                    'Client': client,
+                    'Start Date': '',  # Will be calculated when previous task completes
+                    'Due Date': '',    # Will be calculated when previous task completes
+                    'ActiveWorkflowID': active_workflow_id,
+                    'Estimated Time': step.get('Est_Time', 0),
+                    'Enjoyment': step.get('Enjoyment', 3),
+                    'Importance': step.get('Importance', 3),
+                    'Workflow_Step_Number': step_number
+                }
+                
+                task_row = [new_task.get(h, '') for h in task_headers]
+                tasks_sheet.append_row(task_row, value_input_option='USER_ENTERED')
+                tasks_created += 1
+        
+        if tasks_created > 0:
+            st.success(f"✅ Added {tasks_created} missing task(s) to workflow {active_workflow_id}")
+            st.cache_data.clear()
+            return True
+        else:
+            st.info("✅ Workflow is already complete with all tasks created.")
+            return False
+            
+    except Exception as e:
+        st.error(f"Failed to complete legacy workflow: {e}")
+        return False
+
 st.set_page_config(
     page_title="Quietude OS",
     page_icon="🧘",

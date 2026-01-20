@@ -33,7 +33,14 @@ from quietude import (
 
 
 # --- CONFIGURATION (UI-specific) ---
-EMAIL_ALIASES = st.secrets["EMAIL_ALIASES"]
+GEMINI_API_KEY = "PASTE_YOUR_API_KEY_HERE" # This can remain here as it's specific to the AI features in this file
+EMAIL_ALIASES = {
+    "Primary Inbox": "ben.anderson@the1099cpa.com",
+    "Aegis Email": "ben.a@aegisaccountingservices.com",
+    "Personal Email": "benjamin.james.anderson@gmail.com",
+    "Google Voice - Aegis": "ben.a@aegisaccountingservices.com",
+    "Google Voice - 1099": "ben.anderson@the1099cpa.com"
+}
 
 
 # --- All local function definitions have been removed, as they are now imported ---
